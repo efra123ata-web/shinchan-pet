@@ -34,6 +34,15 @@ class Qt_pet(QtWidgets.QWidget):
     def __init__(self):
         super(Qt_pet, self).__init__()
         self.dis_file = "img1"
+
+        # 自动移动功能相关（必须在 icon_quit() 之前初始化，否则构建菜单会报错）
+        self.dragging = False
+        self.mouse_pos = QPoint()
+        self.last_mouse_pos = QPoint()
+        self.is_auto_move_enabled = True   # 默认开启自动走动
+        self.animation_running = False     # 是否正在播放动画
+        self.chat_app = None
+
         self.windowinit()
         self.icon_quit()
 
@@ -42,15 +51,10 @@ class Qt_pet(QtWidgets.QWidget):
         self.timer.timeout.connect(self.img_update)
         self.timer.start(100)
 
-        # 用于存储 ChatApp 实例
-        self.chat_app = None
-
-        # 自动移动功能相关
-        self.dragging = False
-        self.mouse_pos = QPoint()
-        self.last_mouse_pos = QPoint()
-        self.is_auto_move_enabled = False  # 默认禁用自动移动功能
-        self.animation_running = False    # 是否正在播放动画
+        # 随机漫步定时器（每 8 秒走一次）
+        self.walk_timer = QTimer()
+        self.walk_timer.timeout.connect(self.random_walk)
+        self.walk_timer.start(8000)
 
         # 设置鼠标事件过滤器
         self.installEventFilter(self)
@@ -123,60 +127,74 @@ class Qt_pet(QtWidgets.QWidget):
         with music_lock:
             current_volume = value / 100.0
 
+    # 构建菜单（托盘图标和宠物本体右键共用同一套）
+    def build_pet_menu(self):
+        menu = QtWidgets.QMenu(self)
+
+        # 切换动画
+        changeSubMenu = QtWidgets.QMenu(self)
+        changeSubMenu.setTitle("切换动画")
+        for dir in self.dir2img.keys():
+            act = QtWidgets.QAction(os.path.basename(dir), self, triggered=partial(self.changeImg, dir))
+            changeSubMenu.addAction(act)
+        menu.addMenu(changeSubMenu)
+
+        # 自动走动开关
+        self.enable_auto_move_action = QtWidgets.QAction("自动走动", self)
+        self.enable_auto_move_action.setCheckable(True)
+        self.enable_auto_move_action.setChecked(self.is_auto_move_enabled)
+        self.enable_auto_move_action.triggered.connect(self.toggle_auto_move)
+        menu.addAction(self.enable_auto_move_action)
+
+        # 聊天 / 余额 / 天气
+        menu.addAction(QtWidgets.QAction('聊天', self, triggered=self.start_chat_app))
+        menu.addAction(QtWidgets.QAction('查询余额', self, triggered=self.show_balance))
+        menu.addAction(QtWidgets.QAction('查看天气', self, triggered=self.show_weather))
+
+        # 音乐开关
+        self.music_toggle = QtWidgets.QAction('音乐', self, checkable=True)
+        self.music_toggle.setChecked(True)
+        self.music_toggle.triggered.connect(self.toggle_music)
+        menu.addAction(self.music_toggle)
+
+        # 音量滑块
+        volume_slider = QtWidgets.QSlider(Qt.Horizontal)
+        volume_slider.setRange(0, 100)
+        volume_slider.setValue(int(current_volume * 100))
+        volume_slider.setFixedWidth(150)
+        volume_slider.valueChanged.connect(self.adjust_volume)
+        volume_action = QtWidgets.QWidgetAction(self)
+        volume_action.setDefaultWidget(volume_slider)
+        menu.addAction(volume_action)
+
+        # 开机自启开关
+        self.autostart_action = QtWidgets.QAction("开机自启", self)
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setChecked(self.is_autostart_enabled())
+        self.autostart_action.triggered.connect(self.toggle_autostart)
+        menu.addAction(self.autostart_action)
+
+        menu.addSeparator()
+        menu.addAction(QtWidgets.QAction('退出', self, triggered=self.quit))
+        return menu
+
     # 设置系统托盘
     def icon_quit(self):
         self.mini_icon = QtWidgets.QSystemTrayIcon(self)
         self.mini_icon.setIcon(QtGui.QIcon(os.path.join(self.current_dir, self.dir2img[self.current_dir][0])))
         self.mini_icon.setToolTip("蜡笔小新")
-        quit_menu = QtWidgets.QAction('退出', self, triggered=self.quit)
-        tpMenu = QtWidgets.QMenu(self)
-        
-        changeSubMenu = QtWidgets.QMenu(self)
-        changeSubMenu.setTitle("切换")
-        for dir in self.dir2img.keys():
-            act = QtWidgets.QAction(os.path.basename(dir), self, triggered=partial(self.changeImg, dir))
-            changeSubMenu.addAction(act)
-        tpMenu.addMenu(changeSubMenu)
-
-        # 添加自动移动功能开关
-        self.enable_auto_move_action = QtWidgets.QAction("移动开关", self)
-        self.enable_auto_move_action.setCheckable(True)
-        self.enable_auto_move_action.setChecked(False)  # 默认未勾选
-        self.enable_auto_move_action.triggered.connect(self.toggle_auto_move)
-        tpMenu.addAction(self.enable_auto_move_action)
-
-        # 添加启动 ChatApp 的菜单项
-        chat_app_action = QtWidgets.QAction('聊天', self, triggered=self.start_chat_app)
-        tpMenu.addAction(chat_app_action)
-
-        # 添加余额查询
-        balance_action = QtWidgets.QAction('查询余额', self, triggered=self.show_balance)
-        tpMenu.addAction(balance_action)
-        tpMenu.addAction(quit_menu)
-        self.mini_icon.setContextMenu(tpMenu)
+        self.mini_icon.setContextMenu(self.build_pet_menu())
         self.mini_icon.show()
-
-        # 添加音乐控制菜单
-        self.music_toggle = QtWidgets.QAction('音乐开关', self, checkable=True)
-        self.music_toggle.setChecked(True)
-        self.music_toggle.triggered.connect(self.toggle_music)
-        tpMenu.addAction(self.music_toggle)
-
-        # 添加音量滑块
-        volume_slider = QtWidgets.QSlider(Qt.Horizontal)
-        volume_slider.setRange(0, 100)
-        volume_slider.setValue(int(current_volume * 100))
-        volume_slider.valueChanged.connect(self.adjust_volume)
-        
-        volume_action = QtWidgets.QWidgetAction(self)
-        volume_action.setDefaultWidget(volume_slider)
-        tpMenu.addAction(volume_action)
 
         # 定时刷新余额到托盘悬停提示（每 10 分钟一次；启动 3 秒后先查一次）
         self.balance_timer = QTimer(self)
         self.balance_timer.timeout.connect(self.update_balance_tooltip)
         self.balance_timer.start(600000)
         QTimer.singleShot(3000, self.update_balance_tooltip)
+
+    def contextMenuEvent(self, event):
+        """在宠物身上直接右键 → 弹出菜单（不用去找系统托盘）"""
+        self.build_pet_menu().exec_(event.globalPos())
 
     def toggle_auto_move(self, checked):
         # 切换自动移动功能
@@ -284,6 +302,58 @@ class Qt_pet(QtWidgets.QWidget):
         bal = fetch_balance()
         if bal:
             self.mini_icon.setToolTip(f"蜡笔小新 | 余额 {bal}")
+
+    def random_walk(self):
+        """随机漫步：每隔几秒走到屏幕上的新位置"""
+        if self.dragging or self.animation_running or not self.is_auto_move_enabled:
+            return
+        import random
+        screen = QApplication.desktop().availableGeometry()
+        max_x = max(1, screen.width() - self.width())
+        max_y = max(1, screen.height() - self.height())
+        self.start_animation(random.randint(0, max_x), random.randint(0, max_y), 5000)
+
+    def show_weather(self):
+        """查询天气（wttr.in，免 key）"""
+        try:
+            r = requests.get("https://wttr.in/?format=%l:+%c+%t+%w", timeout=10)
+            if r.status_code == 200 and r.text.strip():
+                QtWidgets.QMessageBox.information(None, "今天天气", r.text.strip())
+            else:
+                raise ValueError("bad response")
+        except Exception:
+            QtWidgets.QMessageBox.warning(None, "查询失败", "天气查询失败，检查一下网络~")
+
+    def _startup_bat_path(self):
+        appdata = os.environ.get("APPDATA", "")
+        startup = os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+        return os.path.join(startup, "shinchan-pet.bat")
+
+    def is_autostart_enabled(self):
+        try:
+            return os.path.exists(self._startup_bat_path())
+        except Exception:
+            return False
+
+    def toggle_autostart(self, checked):
+        """开机自启：在 Windows 启动文件夹放一个 .bat（无需管理员权限）"""
+        path = self._startup_bat_path()
+        try:
+            if checked:
+                pyw = sys.executable.replace("python.exe", "pythonw.exe")
+                if not os.path.exists(pyw):
+                    pyw = sys.executable
+                script = os.path.join(current_dir, "pet.py")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="gbk") as f:
+                    f.write("@echo off\n")
+                    f.write(f'cd /d "{current_dir}"\n')
+                    f.write(f'start "" "{pyw}" "{script}"\n')
+            else:
+                if os.path.exists(path):
+                    os.remove(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(None, "设置失败", f"开机自启设置失败：{e}")
 
 ##########聊天模块##########
 
