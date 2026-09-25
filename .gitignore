@@ -1,0 +1,14 @@
+# 依赖与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+
+# 密钥（绝不上传）
+.env
+
+# 素材文件（版权原因不上传，请自备）
+assets/
+xiao_xin.ico
