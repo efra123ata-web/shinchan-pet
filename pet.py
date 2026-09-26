@@ -42,6 +42,9 @@ class Qt_pet(QtWidgets.QWidget):
         self.is_auto_move_enabled = True   # 默认开启自动走动
         self.animation_running = False     # 是否正在播放动画
         self.chat_app = None
+        self._moved = False            # 左键是否移动过（区分单击/拖动）
+        self.bubble = SpeechBubble()   # 余额气泡
+        self._cached_balance = None    # 缓存的余额字符串（避免点击时阻塞网络查询）
 
         self.windowinit()
         self.icon_quit()
@@ -55,9 +58,6 @@ class Qt_pet(QtWidgets.QWidget):
         self.walk_timer = QTimer()
         self.walk_timer.timeout.connect(self.random_walk)
         self.walk_timer.start(8000)
-
-        # 设置鼠标事件过滤器
-        self.installEventFilter(self)
 
     def img_update(self):
         if self.img_num < len(self.dir2img[self.current_dir])-1:
@@ -95,9 +95,9 @@ class Qt_pet(QtWidgets.QWidget):
         screen_rect = QApplication.desktop().availableGeometry()
         self.pet_width = 200
         self.pet_height = 200
-        self.x = screen_rect.width() - self.pet_width
-        self.y = screen_rect.height() - self.pet_height
-        self.setGeometry(self.x, self.y, self.pet_width, self.pet_height)
+        init_x = screen_rect.width() - self.pet_width
+        init_y = screen_rect.height() - self.pet_height
+        self.setGeometry(init_x, init_y, self.pet_width, self.pet_height)
         self.setWindowTitle('蜡笔小新')
         self.img_num = 0
         # 找到配置文件，失败则退出
@@ -127,32 +127,40 @@ class Qt_pet(QtWidgets.QWidget):
         with music_lock:
             current_volume = value / 100.0
 
+    def _style_menu(self, menu):
+        """菜单圆角 + 阴影"""
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        shadow = QtWidgets.QGraphicsDropShadowEffect(menu)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QtGui.QColor(0, 0, 0, 70))
+        menu.setGraphicsEffect(shadow)
+        return menu
+
     # 构建菜单（托盘图标和宠物本体右键共用同一套）
     def build_pet_menu(self):
-        menu = QtWidgets.QMenu(self)
+        menu = self._style_menu(QtWidgets.QMenu(self))
 
         # 切换动画
-        changeSubMenu = QtWidgets.QMenu(self)
-        changeSubMenu.setTitle("切换动画")
+        changeSubMenu = self._style_menu(QtWidgets.QMenu("🎬 切换动画", self))
         for dir in self.dir2img.keys():
             act = QtWidgets.QAction(os.path.basename(dir), self, triggered=partial(self.changeImg, dir))
             changeSubMenu.addAction(act)
         menu.addMenu(changeSubMenu)
 
         # 自动走动开关
-        self.enable_auto_move_action = QtWidgets.QAction("自动走动", self)
+        self.enable_auto_move_action = QtWidgets.QAction("🚶 自动走动", self)
         self.enable_auto_move_action.setCheckable(True)
         self.enable_auto_move_action.setChecked(self.is_auto_move_enabled)
         self.enable_auto_move_action.triggered.connect(self.toggle_auto_move)
         menu.addAction(self.enable_auto_move_action)
 
-        # 聊天 / 余额 / 天气
-        menu.addAction(QtWidgets.QAction('聊天', self, triggered=self.start_chat_app))
-        menu.addAction(QtWidgets.QAction('查询余额', self, triggered=self.show_balance))
-        menu.addAction(QtWidgets.QAction('查看天气', self, triggered=self.show_weather))
+        # 聊天（余额改为左键单击小新查看，天气已移除）
+        menu.addAction(QtWidgets.QAction('💬 聊天', self, triggered=self.start_chat_app))
 
         # 音乐开关
-        self.music_toggle = QtWidgets.QAction('音乐', self, checkable=True)
+        self.music_toggle = QtWidgets.QAction('🎵 音乐', self, checkable=True)
         self.music_toggle.setChecked(True)
         self.music_toggle.triggered.connect(self.toggle_music)
         menu.addAction(self.music_toggle)
@@ -168,14 +176,14 @@ class Qt_pet(QtWidgets.QWidget):
         menu.addAction(volume_action)
 
         # 开机自启开关
-        self.autostart_action = QtWidgets.QAction("开机自启", self)
+        self.autostart_action = QtWidgets.QAction("🔌 开机自启", self)
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self.is_autostart_enabled())
         self.autostart_action.triggered.connect(self.toggle_autostart)
         menu.addAction(self.autostart_action)
 
         menu.addSeparator()
-        menu.addAction(QtWidgets.QAction('退出', self, triggered=self.quit))
+        menu.addAction(QtWidgets.QAction('✖ 退出', self, triggered=self.quit))
         return menu
 
     # 设置系统托盘
@@ -203,6 +211,7 @@ class Qt_pet(QtWidgets.QWidget):
     def mousePressEvent(self, QMouseEvent):
         if QMouseEvent.button() == QtCore.Qt.MouseButton.LeftButton:
             self.dragging = True
+            self._moved = False
             self.mouse_pos = QMouseEvent.globalPos()
             QMouseEvent.accept()
             self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor))
@@ -210,6 +219,8 @@ class Qt_pet(QtWidgets.QWidget):
     def mouseMoveEvent(self, QMouseEvent):
         if self.dragging:
             delta = QMouseEvent.globalPos() - self.mouse_pos
+            if abs(delta.x()) + abs(delta.y()) > 6:
+                self._moved = True  # 移动超过阈值 → 判定为拖动而非点击
             new_pos = self.pos() + delta
             self.last_mouse_pos = self.pos()  # 记录上一次位置
             self.move(new_pos)
@@ -218,6 +229,8 @@ class Qt_pet(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, QMouseEvent):
         if QMouseEvent.button() == QtCore.Qt.MouseButton.LeftButton:
+            if not self._moved:
+                self.show_balance_bubble()  # 没拖动 = 单击 → 弹余额气泡
             self.dragging = False
             self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.ArrowCursor))
 
@@ -286,21 +299,51 @@ class Qt_pet(QtWidgets.QWidget):
 
     def start_chat_app(self):
         if not self.chat_app:
-            self.chat_app = ChatApp()
+            self.chat_app = ChatApp(cost_callback=self.show_cost_bubble)
             self.chat_app.show()
 
-    def show_balance(self):
-        """托盘菜单「查询余额」：弹窗显示当前账户余额"""
-        bal = fetch_balance()
-        if bal:
-            QtWidgets.QMessageBox.information(None, "小新帮你查余额啦~", f"当前余额：{bal}")
+    def show_balance_bubble(self):
+        """左键单击小新 → 在左上角弹出肥嘟嘟左卫门气泡（优先用缓存，避免阻塞）"""
+        bal = self._cached_balance or fetch_balance()
+        if bal is None:
+            self.bubble.show_bubble("没查到余额…", fg="#000000")
         else:
-            QtWidgets.QMessageBox.warning(None, "查询失败", "没能查到余额哦\n检查一下 API Key 和网络~")
+            value = _parse_balance(bal)
+            if value is not None and value <= 0:
+                # 余额为 0：真是伤脑筋 + 广志语音
+                self.bubble.show_bubble("真是伤脑筋", fg="#E03131", duration=6000)
+                self.play_hiroshi_voice()
+            elif value is not None and value < LOW_BALANCE_THRESHOLD:
+                # 余额告急
+                self.bubble.show_bubble(f"余额告急！只剩 {bal}", fg="#E8590C", duration=6000)
+            else:
+                # 正常
+                self.bubble.show_bubble(f"余额 {bal}", fg="#000000")
+        # 定位到小新左上角
+        bh = self.bubble.height()
+        self.bubble.move(self.pos().x() - 10, self.pos().y() - bh - 12)
+
+    def show_cost_bubble(self, cost):
+        """聊天完成后，弹气泡显示本轮消耗（模仿 dsh 视频）"""
+        self.bubble.show_bubble(f"本轮消耗 ￥{cost:.2f}", fg="#000000", duration=4000)
+        bh = self.bubble.height()
+        self.bubble.move(self.pos().x() - 10, self.pos().y() - bh - 12)
+
+    def play_hiroshi_voice(self):
+        """播放广志语音「真是伤脑筋」（音频需自备：assets/audio/广志真是伤脑筋.wav）"""
+        path = os.path.join(current_dir, "assets", "audio", "广志真是伤脑筋.wav")
+        if not os.path.exists(path):
+            return
+        try:
+            pygame.mixer.Sound(path).play()
+        except Exception:
+            pass
 
     def update_balance_tooltip(self):
         """静默刷新托盘悬停提示为当前余额"""
         bal = fetch_balance()
         if bal:
+            self._cached_balance = bal
             self.mini_icon.setToolTip(f"蜡笔小新 | 余额 {bal}")
 
     def random_walk(self):
@@ -312,17 +355,6 @@ class Qt_pet(QtWidgets.QWidget):
         max_x = max(1, screen.width() - self.width())
         max_y = max(1, screen.height() - self.height())
         self.start_animation(random.randint(0, max_x), random.randint(0, max_y), 5000)
-
-    def show_weather(self):
-        """查询天气（wttr.in，免 key）"""
-        try:
-            r = requests.get("https://wttr.in/?format=%l:+%c+%t+%w", timeout=10)
-            if r.status_code == 200 and r.text.strip():
-                QtWidgets.QMessageBox.information(None, "今天天气", r.text.strip())
-            else:
-                raise ValueError("bad response")
-        except Exception:
-            QtWidgets.QMessageBox.warning(None, "查询失败", "天气查询失败，检查一下网络~")
 
     def _startup_bat_path(self):
         appdata = os.environ.get("APPDATA", "")
@@ -402,6 +434,93 @@ def fetch_balance():
         return None
     return None
 
+
+LOW_BALANCE_THRESHOLD = 5.0  # 余额低于此值视为「告急」（单位：CNY）
+
+
+def _parse_balance(bal_str):
+    """从 'CNY 6.50' 里提取数字 6.5"""
+    if not bal_str:
+        return None
+    digits = ''.join(c for c in bal_str if c.isdigit() or c == '.')
+    if not digits:
+        return None
+    try:
+        return float(digits)
+    except ValueError:
+        return None
+
+
+class SpeechBubble(QtWidgets.QWidget):
+    """肥嘟嘟左卫门气泡：头部图 + 余额文字在牙齿上（无图时退回纯文字标签）"""
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._head_pixmap = None
+
+        # 头部图
+        self.image_lab = QtWidgets.QLabel(self)
+        self.image_lab.setAttribute(Qt.WA_TranslucentBackground)
+        self.image_lab.hide()
+
+        # 牙齿上的文字
+        self.teeth_lab = QtWidgets.QLabel(self)
+        self.teeth_lab.setAttribute(Qt.WA_TranslucentBackground)
+        self.teeth_lab.setFont(QFont("微软雅黑", 10, QFont.Bold))
+        self.teeth_lab.hide()
+
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide)
+
+        # 预加载头部图
+        head_path = os.path.join(current_dir, "assets", "zuoweimen_head.png")
+        if os.path.exists(head_path):
+            self._head_pixmap = QtGui.QPixmap(head_path)
+
+    def show_bubble(self, text, fg="#3A3A3A", duration=4500):
+        """显示气泡：头部图 + 文字在牙齿；图片缺失则退回纯文字标签"""
+        if self._head_pixmap is not None and not self._head_pixmap.isNull():
+            scaled = self._head_pixmap.scaledToWidth(280, Qt.SmoothTransformation)
+            self.image_lab.setPixmap(scaled)
+            self.image_lab.resize(scaled.size())
+            self.image_lab.show()
+            self.resize(scaled.size())
+            self.teeth_lab.setText(text)
+            self.teeth_lab.setStyleSheet(
+                f"color: {fg}; background-color: rgba(255,255,255,215);"
+                f"border-radius: 8px; padding: 3px 9px;"
+            )
+            self.teeth_lab.adjustSize()
+            # 文字中心对准眼睛位置（额头中间）
+            cx = int(scaled.width() * 0.46)
+            cy = int(scaled.height() * 0.45)
+            tx = max(0, cx - self.teeth_lab.width() // 2)
+            ty = max(0, cy - self.teeth_lab.height() // 2)
+            self.teeth_lab.move(tx, ty)
+            self.teeth_lab.show()
+        else:
+            # 无图 fallback：纯文字圆角标签
+            self.image_lab.hide()
+            self.teeth_lab.setText(text)
+            self.teeth_lab.setStyleSheet(
+                f"color: {fg}; background-color: #FFFFFF;"
+                f"border: 1px solid #EFEFEF; border-radius: 12px; padding: 8px 12px;"
+            )
+            self.teeth_lab.adjustSize()
+            self.teeth_lab.move(0, 0)
+            self.teeth_lab.show()
+            self.resize(self.teeth_lab.size())
+        self.show()
+        self.raise_()
+        self._hide_timer.start(duration)
+
+
 system_prompt = '''
 你是一个桌面宠物智能体，你很擅长模仿蜡笔小新(野原新之助)这个动漫角色的说话风格和用户进行交互聊天。
 '''
@@ -416,7 +535,28 @@ def gen_prompt(context_text, user_input):
     {user_input}
     """
 
+_last_cost = 0.0  # 最近一次对话消耗（元）
+
+
+def _calc_cost(usage):
+    """按 DeepSeek flash 定价计算本次消耗（元）"""
+    if usage is None:
+        return 0.0
+    try:
+        prompt_tokens = usage.prompt_tokens or 0
+        completion_tokens = usage.completion_tokens or 0
+    except AttributeError:
+        return 0.0
+    import datetime
+    now = datetime.datetime.now()
+    is_peak = now.weekday() < 5 and (9 <= now.hour < 12 or 14 <= now.hour < 18)
+    in_price = (2.0 if is_peak else 1.0) / 1_000_000
+    out_price = (8.0 if is_peak else 4.0) / 1_000_000
+    return prompt_tokens * in_price + completion_tokens * out_price
+
+
 def call_llm(user_input):
+    global _last_cost
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": gen_prompt(text, user_input)}
@@ -427,6 +567,7 @@ def call_llm(user_input):
         messages=messages,
         temperature=1
     )
+    _last_cost = _calc_cost(getattr(response, 'usage', None))
     return response.choices[0].message.content
 
 # 初始化聊天历史（保持原有结构）
@@ -452,26 +593,26 @@ class ChatBubble(QLabel):
         self.initUI()
 
     def initUI(self):
-        # 设置气泡样式
+        # 设置气泡样式（微信式不对称圆角：贴边一侧小圆角）
         if self.is_sender:
             self.setStyleSheet("""
                 QLabel {
-                    background-color: #DCF8C6;
-                    border-radius: 15px;
-                    padding: 10px;
-                    margin: 5px;
-                    alignment: right;
+                    background-color: #FFE082;
+                    color: #3A2E1A;
+                    border-radius: 12px 4px 12px 12px;
+                    padding: 10px 14px;
+                    margin: 4px 8px;
                 }
             """)
         else:
             self.setStyleSheet("""
                 QLabel {
                     background-color: #FFFFFF;
-                    border-radius: 15px;
-                    padding: 10px;
-                    margin: 5px;
-                    alignment: left;
-                    border: 1px solid #DDDDDD;
+                    color: #3A3A3A;
+                    border-radius: 4px 12px 12px 12px;
+                    padding: 10px 14px;
+                    margin: 4px 8px;
+                    border: 1px solid #EFEFEF;
                 }
             """)
         # 确保高度根据内容自动调整
@@ -479,17 +620,21 @@ class ChatBubble(QLabel):
         self.setMinimumHeight(40)  # 设置最小高度，避免过小
 
 class ChatApp(QWidget):
-    def __init__(self):
+    def __init__(self, cost_callback=None):
         super().__init__()
+        self.cost_callback = cost_callback
         self.initUI()
     
     def initUI(self):
         # 创建主布局
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         # 设置窗口
         self.setLayout(main_layout)
         self.setWindowTitle('蜡笔小新')
         self.setGeometry(300, 300, 480, 800)
+        self.setStyleSheet("background-color: #FAF7F2;")
         # 加载并设置左上角窗口图标（图标需自备，缺失时跳过）
         if os.path.exists('xiao_xin.ico'):
             icon = QIcon('xiao_xin.ico')
@@ -497,36 +642,67 @@ class ChatApp(QWidget):
 
         # 消息显示区域
         self.message_area = QWidget()
-        self.message_area.setStyleSheet("background-color: #FFC0CB;")  # 设置消息显示区域的颜色为粉色#FFC0CB
+        self.message_area.setStyleSheet("background-color: #FAF7F2;")
         message_layout = QVBoxLayout(self.message_area)
-        
+
         # 使用 QScrollArea 来支持消息区域的滚动
         scroll = QScrollArea()
         scroll.setWidget(self.message_area)
         scroll.setWidgetResizable(True)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-
-        # 设置滚动条样式为粉色
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet("""
-            QScrollBar:vertical {
-                background: #FFC0CB;
-                width: 10px;
-            }
+            QScrollBar:vertical { background: transparent; width: 6px; }
+            QScrollBar::handle:vertical { background: #E0DCD3; border-radius: 3px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """)
         main_layout.addWidget(scroll)
 
         # 创建输入框和发送按钮的布局
         input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(12, 10, 12, 12)
+        input_layout.setSpacing(8)
 
         # 创建输入框
         self.input_box = QLineEdit(self)
-        self.input_box.setStyleSheet("background-color: #FFC0CB;")  # 设置输入框背景颜色
-        input_layout.addWidget(self.input_box)
+        self.input_box.setPlaceholderText("和小新说点什么…")
+        self.input_box.setStyleSheet("""
+            QLineEdit {
+                background-color: #FFFFFF;
+                border: 1px solid #EBE6DC;
+                border-radius: 20px;
+                padding: 10px 16px;
+                font-size: 13px;
+                color: #3A3A3A;
+            }
+            QLineEdit:focus {
+                border: 1px solid #E85A4F;
+            }
+        """)
+        self.input_box.returnPressed.connect(self.send_message)
+        input_layout.addWidget(self.input_box, 1)
 
         # 创建发送按钮
         send_button = QPushButton('发送', self)
         send_button.clicked.connect(self.send_message)
-        send_button.setStyleSheet("background-color: #FFC0CB;")  # 设置按钮背景颜色
+        send_button.setCursor(Qt.PointingHandCursor)
+        send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #E85A4F;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 20px;
+                padding: 10px 22px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #D94A3F;
+            }
+            QPushButton:pressed {
+                background-color: #C93F35;
+            }
+        """)
         input_layout.addWidget(send_button)
 
         # 将输入框和发送按钮的布局添加到主布局
@@ -536,30 +712,43 @@ class ChatApp(QWidget):
         self.send_welcome_message()
 
     def send_welcome_message(self):
-        # 自动发送欢迎消息
-        welcome_message = chat("你好！", history)
-        self.add_message("小新", welcome_message, is_sender=False)
+        # 静态欢迎语，立即显示（避免启动时调 API 导致聊天框卡顿）
+        self.add_message("小新", "嗨~我是野原新之助，找我聊天吗？", is_sender=False)
 
     def send_message(self):
-        # 获取用户输入的消息
         message = self.input_box.text()
-        if message:
-            # 在聊天记录中显示用户消息
-            self.add_message("你", message, is_sender=True)
-            # 清空输入框
-            self.input_box.clear()
+        if not message:
+            return
+        # 先显示用户消息
+        self.add_message("你", message, is_sender=True)
+        self.input_box.clear()
 
-            # 检查网络连接
-            if not check_internet_connection():
-                # 如果没有网络连接，显示提示信息
-                QMessageBox.warning(self, "网络错误哦~", "妈妈，为什么小新不能和大姐姐聊天了？\n\n可我检查了我们家里的网络没有问题呀，是不是大姐姐家的网络坏掉了？")
-                return
+        # 异步调用 API，不阻塞 UI
+        self._reply = [None]
 
-            # 调用chat函数获取回复
-            response = chat(message, history)
+        def worker():
+            try:
+                self._reply[0] = chat(message, history)
+            except Exception as e:
+                self._reply[0] = f"(小新走神了：{type(e).__name__}，稍后再试~)"
 
-            # 在聊天记录中显示蜡笔小新智能体的回复
-            self.add_message("小新", response, is_sender=False)
+        threading.Thread(target=worker, daemon=True).start()
+
+        # 轮询结果，返回后更新 UI
+        if not hasattr(self, '_poll_timer'):
+            self._poll_timer = QTimer(self)
+            self._poll_timer.timeout.connect(self._poll_reply)
+        self._poll_timer.start(150)
+
+    def _poll_reply(self):
+        if self._reply and self._reply[0] is not None:
+            self._poll_timer.stop()
+            reply = self._reply[0]
+            self._reply = [None]
+            self.add_message("小新", reply, is_sender=False)
+            # 聊天完成后，弹气泡显示本轮消耗（模仿视频）
+            if self.cost_callback and _last_cost > 0:
+                self.cost_callback(_last_cost)
 
     def add_message(self, sender, message, is_sender):
         # 创建新的气泡并添加到消息区域
@@ -627,8 +816,81 @@ def stop_music():
         pygame.mixer.music.stop()
         pygame.quit()
 
+##########全局样式##########
+
+APP_QSS = """
+QMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #EFEFEF;
+    border-radius: 14px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 9px 28px 9px 20px;
+    margin: 2px 6px;
+    border-radius: 9px;
+    color: #3A3A3A;
+    font-size: 13px;
+}
+QMenu::item:selected {
+    background-color: #FFF3E0;
+    color: #E85A4F;
+}
+QMenu::separator {
+    height: 1px;
+    background: #F0F0F0;
+    margin: 5px 14px;
+}
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+}
+QMessageBox {
+    background-color: #FFFFFF;
+}
+QMessageBox QLabel {
+    color: #3A3A3A;
+    font-size: 13px;
+}
+QMessageBox QPushButton {
+    background-color: #E85A4F;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 8px;
+    padding: 7px 20px;
+    font-size: 13px;
+}
+QMessageBox QPushButton:hover {
+    background-color: #D94A3F;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #EFEFEF;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #E85A4F;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+"""
+
+
 if __name__ == '__main__':
+    # 单实例保护：绑定固定端口，绑不上说明已有实例在跑，静默退出
+    import socket as _socket
+    try:
+        _instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _instance_lock.bind(('127.0.0.1', 54321))
+        _instance_lock.listen(1)
+    except OSError:
+        sys.exit(0)
+
     app = QApplication(sys.argv)
+    app.setStyleSheet(APP_QSS)
+    app.setQuitOnLastWindowClosed(False)  # 关闭弹窗/子窗口不再导致小新退出，只靠「退出」菜单退出
     pet = Qt_pet()
     # sys.exit(app.exec_())
 
